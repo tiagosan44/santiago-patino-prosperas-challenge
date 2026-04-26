@@ -10,7 +10,8 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "e2e:smoke": "playwright test auth.spec.ts jobs.spec.ts -g 'happy path|invalid credentials'"
   },
   "dependencies": {
     "react": "^18.3.1",

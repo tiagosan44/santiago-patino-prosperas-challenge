@@ -40,6 +40,16 @@ def _standard_queue_url() -> str:
     return get_settings().sqs_standard_queue_url
 
 
+# ----- back-off constants -----
+
+MAX_DELIVERIES = 3  # matches SQS RedrivePolicy.maxReceiveCount
+
+
+def _backoff_seconds(receive_count: int) -> int:
+    """Exponential backoff: 90, 180, 360, ... capped at 900 seconds."""
+    return min(900, 90 * (2 ** (receive_count - 1)))
+
+
 # ----- polling -----
 
 def poll_next_message(sqs, wait_high: int = 1, wait_standard: int = 20) -> dict | None:
@@ -94,6 +104,8 @@ def handle_message(
     s3,
     redis_client,
     bucket: str,
+    sqs=None,
+    queue_url: str | None = None,
 ) -> bool:
     """Process one SQS message.
 
@@ -143,18 +155,38 @@ def handle_message(
             params=job.params,
         )
     except processor.ProcessingError as e:
-        log.warning("processing_failed", job_id=job_id, error=str(e))
-        error_msg = f"[{job.report_type}] {e}"
+        receive_count = int(message.get("Attributes", {}).get("ApproximateReceiveCount", "1"))
+
+        # Always log the failure
+        log.warning(
+            "processing_failed",
+            job_id=job_id, error=str(e), receive_count=receive_count,
+        )
+
+        if receive_count < MAX_DELIVERIES and sqs is not None and queue_url is not None:
+            # B4: exponential back-off — extend visibility, leave message for retry
+            delay = _backoff_seconds(receive_count)
+            try:
+                sqs.change_message_visibility(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=message["ReceiptHandle"],
+                    VisibilityTimeout=delay,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("change_message_visibility_failed", job_id=job_id)
+            return False  # don't delete; let SQS redeliver after `delay` seconds
+
+        # Final attempt: mark FAILED and ack
         try:
             failed_job = jobs_svc.update_job_status(
                 jobs_table,
                 job_id=job_id,
                 expected_version=job.version,
                 status=JobStatus.FAILED,
-                error=error_msg,
+                error=f"[{job.report_type}] {e}",
             )
         except jobs_svc.OptimisticLockError:
-            logger.warning("could not write FAILED for job %s (lock conflict)", job_id)
+            log.warning("could_not_write_failed_lock_conflict", job_id=job_id)
             return True
         _publish_event(redis_client, job=failed_job, event_status="FAILED")
         metrics.job_failed(report_type=failed_job.report_type, error_type=type(e).__name__)

@@ -71,6 +71,9 @@ async def run_one_worker(
             await asyncio.sleep(idle_sleep)
             continue
 
+        queue_url = (
+            _high_queue_url() if _is_high_priority(message) else _standard_queue_url()
+        )
         try:
             should_ack = await asyncio.to_thread(
                 consumer.handle_message,
@@ -79,23 +82,14 @@ async def run_one_worker(
                 s3=s3,
                 redis_client=redis_client,
                 bucket=bucket,
+                sqs=sqs,
+                queue_url=queue_url,
             )
         except Exception:  # noqa: BLE001
             log.exception("worker_handle_crashed", worker_id=worker_id)
             should_ack = False
 
         if should_ack:
-            # Determine which queue this came from. The body has
-            # report_type, but we only know the queue from where we
-            # polled. Simplest: try high first; if the receipt is
-            # invalid SQS will return InvalidParameterValue silently
-            # in our tests (moto). For real SQS, both deletes are
-            # cheap; the wrong one fails harmlessly.
-            queue_url = (
-                _high_queue_url()
-                if _is_high_priority(message)
-                else _standard_queue_url()
-            )
             try:
                 await asyncio.to_thread(
                     sqs.delete_message,

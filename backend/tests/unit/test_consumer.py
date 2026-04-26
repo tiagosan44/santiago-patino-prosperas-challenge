@@ -118,6 +118,8 @@ def test_handle_message_happy_path_completes_job(jobs_table, s3_bucket, redis_cl
             s3=s3_bucket,
             redis_client=redis_client,
             bucket="prosperas-reports-test",
+            sqs=MagicMock(),
+            queue_url="http://x",
         )
 
     assert ack is True
@@ -131,6 +133,9 @@ def test_handle_message_happy_path_completes_job(jobs_table, s3_bucket, redis_cl
 def test_handle_message_processing_error_marks_failed(jobs_table, s3_bucket, redis_client):
     job_id = _create_pending_job(jobs_table, report_type="force_failure")
     msg = _build_message(job_id, report_type="force_failure")
+    msg["Attributes"]["ApproximateReceiveCount"] = "3"  # final attempt
+
+    sqs_mock = MagicMock()
 
     with patch("worker.processor.simulate_sleep"):
         ack = consumer.handle_message(
@@ -139,6 +144,8 @@ def test_handle_message_processing_error_marks_failed(jobs_table, s3_bucket, red
             s3=s3_bucket,
             redis_client=redis_client,
             bucket="prosperas-reports-test",
+            sqs=sqs_mock,
+            queue_url="http://sqs/test",
         )
 
     assert ack is True
@@ -164,6 +171,8 @@ def test_handle_message_duplicate_completed_job_acks(jobs_table, s3_bucket, redi
             s3=s3_bucket,
             redis_client=redis_client,
             bucket="prosperas-reports-test",
+            sqs=MagicMock(),
+            queue_url="http://x",
         )
 
     assert ack is True
@@ -201,6 +210,8 @@ def test_handle_message_optimistic_lock_collision_acks(jobs_table, s3_bucket, re
             s3=s3_bucket,
             redis_client=redis_client,
             bucket="prosperas-reports-test",
+            sqs=MagicMock(),
+            queue_url="http://x",
         )
 
     assert ack is True
@@ -223,6 +234,8 @@ def test_handle_message_publishes_redis_event_on_completion(jobs_table, s3_bucke
             s3=s3_bucket,
             redis_client=redis_client,
             bucket="prosperas-reports-test",
+            sqs=MagicMock(),
+            queue_url="http://x",
         )
 
     msg = pubsub.get_message(timeout=2)
@@ -237,10 +250,13 @@ def test_handle_message_publishes_redis_event_on_completion(jobs_table, s3_bucke
 def test_handle_message_publishes_redis_event_on_failure(jobs_table, s3_bucket, redis_client):
     job_id = _create_pending_job(jobs_table, report_type="force_failure")
     msg = _build_message(job_id, report_type="force_failure")
+    msg["Attributes"]["ApproximateReceiveCount"] = "3"  # final attempt -> FAILED
 
     pubsub = redis_client.pubsub()
     pubsub.subscribe("job-updates")
     pubsub.get_message(timeout=1)  # drain subscribe-confirmation
+
+    sqs_mock = MagicMock()
 
     with patch("worker.processor.simulate_sleep"):
         consumer.handle_message(
@@ -249,6 +265,8 @@ def test_handle_message_publishes_redis_event_on_failure(jobs_table, s3_bucket, 
             s3=s3_bucket,
             redis_client=redis_client,
             bucket="prosperas-reports-test",
+            sqs=sqs_mock,
+            queue_url="http://x",
         )
 
     msg = pubsub.get_message(timeout=2)
@@ -268,6 +286,7 @@ def test_handle_message_returns_false_on_unparseable_body(jobs_table, s3_bucket,
     ack = consumer.handle_message(
         msg, jobs_table=jobs_table, s3=s3_bucket,
         redis_client=redis_client, bucket="prosperas-reports-test",
+        sqs=MagicMock(), queue_url="http://x",
     )
     assert ack is False
 
@@ -280,6 +299,7 @@ def test_handle_message_missing_job_acks(jobs_table, s3_bucket, redis_client):
         ack = consumer.handle_message(
             msg, jobs_table=jobs_table, s3=s3_bucket,
             redis_client=redis_client, bucket="prosperas-reports-test",
+            sqs=MagicMock(), queue_url="http://x",
         )
     assert ack is True
     mock_sleep.assert_not_called()
@@ -296,6 +316,8 @@ def test_handle_message_emits_completed_metric(jobs_table, s3_bucket, redis_clie
             s3=s3_bucket,
             redis_client=redis_client,
             bucket="prosperas-reports-test",
+            sqs=MagicMock(),
+            queue_url="http://x",
         )
 
     res = cw_client.list_metrics(Namespace="Prosperas", MetricName="jobs.completed")
@@ -305,6 +327,9 @@ def test_handle_message_emits_completed_metric(jobs_table, s3_bucket, redis_clie
 def test_handle_message_emits_failed_metric(jobs_table, s3_bucket, redis_client, cw_client):
     job_id = _create_pending_job(jobs_table, report_type="force_failure")
     msg = _build_message(job_id, report_type="force_failure")
+    msg["Attributes"]["ApproximateReceiveCount"] = "3"  # final attempt -> FAILED
+
+    sqs_mock = MagicMock()
 
     with patch("worker.processor.simulate_sleep"):
         consumer.handle_message(
@@ -313,7 +338,95 @@ def test_handle_message_emits_failed_metric(jobs_table, s3_bucket, redis_client,
             s3=s3_bucket,
             redis_client=redis_client,
             bucket="prosperas-reports-test",
+            sqs=sqs_mock,
+            queue_url="http://x",
         )
 
     res = cw_client.list_metrics(Namespace="Prosperas", MetricName="jobs.failed")
     assert len(res["Metrics"]) >= 1
+
+
+# ---- back-off (B4) ----
+
+def test_handle_message_first_failure_calls_change_visibility_with_90s(jobs_table, s3_bucket, redis_client):
+    """First retry: visibility = 90s. Message NOT deleted (returns False)."""
+    job_id = _create_pending_job(jobs_table, report_type="force_failure")
+    msg = _build_message(job_id, report_type="force_failure")
+    msg["Attributes"]["ApproximateReceiveCount"] = "1"  # first try
+
+    sqs_mock = MagicMock()
+
+    with patch("worker.processor.simulate_sleep"):
+        ack = consumer.handle_message(
+            msg,
+            jobs_table=jobs_table,
+            s3=s3_bucket,
+            redis_client=redis_client,
+            bucket="prosperas-reports-test",
+            sqs=sqs_mock,
+            queue_url="http://sqs/test-queue",
+        )
+
+    assert ack is False  # don't delete
+    sqs_mock.change_message_visibility.assert_called_once()
+    kwargs = sqs_mock.change_message_visibility.call_args.kwargs
+    assert kwargs["VisibilityTimeout"] == 90
+    assert kwargs["QueueUrl"] == "http://sqs/test-queue"
+    assert kwargs["ReceiptHandle"] == "rh-1"
+
+    # Job remains in PROCESSING (not FAILED) after retry
+    job = jobs_svc.get_job(jobs_table, job_id)
+    assert job.status == JobStatus.PROCESSING
+
+
+def test_handle_message_second_failure_doubles_visibility_to_180s(jobs_table, s3_bucket, redis_client):
+    job_id = _create_pending_job(jobs_table, report_type="force_failure")
+    msg = _build_message(job_id, report_type="force_failure")
+    msg["Attributes"]["ApproximateReceiveCount"] = "2"
+
+    sqs_mock = MagicMock()
+
+    with patch("worker.processor.simulate_sleep"):
+        ack = consumer.handle_message(
+            msg, jobs_table=jobs_table, s3=s3_bucket,
+            redis_client=redis_client, bucket="prosperas-reports-test",
+            sqs=sqs_mock, queue_url="http://sqs/q",
+        )
+
+    assert ack is False
+    assert sqs_mock.change_message_visibility.call_args.kwargs["VisibilityTimeout"] == 180
+
+
+def test_handle_message_third_failure_marks_failed_and_acks(jobs_table, s3_bucket, redis_client):
+    """receive_count == 3: this IS the final allowed attempt. Mark FAILED, ack."""
+    job_id = _create_pending_job(jobs_table, report_type="force_failure")
+    msg = _build_message(job_id, report_type="force_failure")
+    msg["Attributes"]["ApproximateReceiveCount"] = "3"
+
+    sqs_mock = MagicMock()
+
+    with patch("worker.processor.simulate_sleep"):
+        ack = consumer.handle_message(
+            msg, jobs_table=jobs_table, s3=s3_bucket,
+            redis_client=redis_client, bucket="prosperas-reports-test",
+            sqs=sqs_mock, queue_url="http://sqs/q",
+        )
+
+    assert ack is True
+    sqs_mock.change_message_visibility.assert_not_called()
+
+    job = jobs_svc.get_job(jobs_table, job_id)
+    assert job.status == JobStatus.FAILED
+    assert job.error is not None
+
+
+def test_back_off_caps_at_900_seconds(jobs_table, s3_bucket, redis_client):
+    """If somehow receive_count is very large but < 3, the cap is 900s."""
+    # This test just exercises the math — at receive_count=2, value is 180s.
+    # 90 * 2 ** (n-1) hits 900 at n=4, but we already mark FAILED at n=3.
+    # So this test just validates the helper directly.
+    from worker.consumer import _backoff_seconds
+    assert _backoff_seconds(1) == 90
+    assert _backoff_seconds(2) == 180
+    assert _backoff_seconds(3) == 360  # we never call this in practice but verify formula
+    assert _backoff_seconds(10) == 900  # capped

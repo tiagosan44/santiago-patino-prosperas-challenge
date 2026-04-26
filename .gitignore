@@ -1,0 +1,107 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ===== Node =====
+node_modules/
+dist/
+.vite/
+.parcel-cache/
+.turbo/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ===== Frontend build artifacts =====
+frontend/dist/
+frontend/coverage/
+
+# ===== Playwright =====
+playwright-report/
+test-results/
+playwright/.cache/
+
+# ===== Terraform =====
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ===== AWS =====
+.aws/
+
+# ===== Env files =====
+.env
+.env.*
+!.env.example
+
+# ===== LocalStack data =====
+local/localstack-data/
+local/volume/
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Internal docs (NOT for delivery) =====
+docs/superpowers/
+study/
+
+# ===== Original challenge document (do not redistribute) =====
+Prueba_Tecnica_Prosperas_FullStack_4.docx
+*.docx
+
+# ===== Claude Code internal =====
+.claude/
+
+# ===== Logs =====
+logs/
+*.log

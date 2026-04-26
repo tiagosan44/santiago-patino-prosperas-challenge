@@ -95,3 +95,29 @@ output "worker_log_group_name" {
 output "alarm_topic_arn" {
   value = module.observability.alarm_topic_arn
 }
+
+output "alb_dns_name" {
+  description = "Public DNS of the API ALB. Send API requests here."
+  value       = module.alb.alb_dns_name
+}
+
+output "frontend_url" {
+  description = "Public HTTPS URL of the frontend (CloudFront)."
+  value       = "https://${module.cloudfront.distribution_domain_name}"
+}
+
+output "cloudfront_distribution_id" {
+  value = module.cloudfront.distribution_id
+}
+
+output "ecs_cluster_name" {
+  value = module.ecs.cluster_name
+}
+
+output "api_service_name" {
+  value = module.ecs.api_service_name
+}
+
+output "worker_service_name" {
+  value = module.ecs.worker_service_name
+}

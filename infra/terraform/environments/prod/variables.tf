@@ -21,3 +21,15 @@ variable "azs" {
   type        = list(string)
   default     = ["us-east-1a", "us-east-1b"]
 }
+
+variable "jwt_secret" {
+  description = "JWT signing secret. Pass via TF_VAR_jwt_secret env var; do NOT hardcode."
+  type        = string
+  sensitive   = true
+}
+
+variable "image_tag" {
+  description = "Docker image tag to deploy (typically the git SHA from CI). Use 'latest' for the first apply, then CI will override per push."
+  type        = string
+  default     = "latest"
+}

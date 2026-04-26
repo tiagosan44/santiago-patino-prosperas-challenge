@@ -87,3 +87,14 @@ services:
       - "../backend/worker:/app/worker"
     deploy:
       replicas: 2
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8000
+    image: prosperas-frontend:dev
+    ports: ["5173:80"]
+    depends_on:
+      - api

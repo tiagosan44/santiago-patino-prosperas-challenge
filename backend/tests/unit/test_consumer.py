@@ -430,3 +430,74 @@ def test_back_off_caps_at_900_seconds(jobs_table, s3_bucket, redis_client):
     assert _backoff_seconds(2) == 180
     assert _backoff_seconds(3) == 360  # we never call this in practice but verify formula
     assert _backoff_seconds(10) == 900  # capped
+
+
+# ---- circuit breaker integration (B2) ----
+
+def test_handle_message_skips_when_breaker_open(jobs_table, s3_bucket, redis_client):
+    """If the breaker for this report_type is OPEN, message is left in SQS."""
+    from worker import circuit_breaker as cb_module
+
+    job_id = _create_pending_job(jobs_table)
+    msg = _build_message(job_id)
+
+    # Trip the breaker for "sales"
+    for _ in range(3):
+        cb_module.record_failure(redis_client, "sales")
+    assert cb_module.allow(redis_client, "sales") is False
+
+    sqs_mock = MagicMock()
+
+    with patch("worker.processor.simulate_sleep") as mock_sleep:
+        ack = consumer.handle_message(
+            msg, jobs_table=jobs_table, s3=s3_bucket,
+            redis_client=redis_client, bucket="prosperas-reports-test",
+            sqs=sqs_mock, queue_url="http://x",
+        )
+
+    assert ack is False  # don't delete
+    mock_sleep.assert_not_called()  # processor was NOT invoked
+    sqs_mock.change_message_visibility.assert_called_once()
+
+
+def test_successful_handle_records_success_to_breaker(jobs_table, s3_bucket, redis_client):
+    from worker import circuit_breaker as cb_module
+    job_id = _create_pending_job(jobs_table)
+    msg = _build_message(job_id)
+
+    # Pre-load some failures (below threshold)
+    cb_module.record_failure(redis_client, "sales")
+    cb_module.record_failure(redis_client, "sales")
+
+    with patch("worker.processor.simulate_sleep"):
+        consumer.handle_message(
+            msg, jobs_table=jobs_table, s3=s3_bucket,
+            redis_client=redis_client, bucket="prosperas-reports-test",
+            sqs=MagicMock(), queue_url="http://x",
+        )
+
+    # Success should have reset failure_count
+    state = redis_client.hgetall("circuit_breakers:sales")
+    assert state.get("failure_count") == "0"
+
+
+def test_third_consecutive_processing_error_opens_breaker(jobs_table, s3_bucket, redis_client):
+    """3 PROCESSING-time failures (different jobs, same report_type) open breaker."""
+    from worker import circuit_breaker as cb_module
+
+    sqs_mock = MagicMock()
+
+    for i in range(3):
+        job_id = _create_pending_job(jobs_table, report_type="force_failure")
+        msg = _build_message(job_id, report_type="force_failure")
+        msg["Attributes"]["ApproximateReceiveCount"] = "1"  # so it doesn't mark FAILED yet
+
+        with patch("worker.processor.simulate_sleep"):
+            consumer.handle_message(
+                msg, jobs_table=jobs_table, s3=s3_bucket,
+                redis_client=redis_client, bucket="prosperas-reports-test",
+                sqs=sqs_mock, queue_url="http://x",
+            )
+
+    # After 3 record_failure, the breaker for force_failure is OPEN
+    assert cb_module.allow(redis_client, "force_failure") is False

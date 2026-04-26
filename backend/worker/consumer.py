@@ -24,6 +24,7 @@ from app.core.config import get_settings
 from app.core.logging_config import get_logger
 from app.models.job import JobStatus
 from app.services import jobs as jobs_svc
+from . import circuit_breaker as cb
 from . import processor
 
 log = get_logger(__name__)
@@ -131,6 +132,24 @@ def handle_message(
         log.info("job_already_terminal_acking_duplicate", job_id=job_id, status=job.status)
         return True
 
+    # 3b. Circuit breaker (B2): if recently the same report_type has failed
+    # repeatedly, refuse to process now. The message stays in SQS;
+    # eventually visibility expires and another worker tries — by then
+    # the breaker may have transitioned to HALF_OPEN.
+    if not cb.allow(redis_client, job.report_type):
+        log.info("circuit_breaker_open_skipping", job_id=job_id, report_type=job.report_type)
+        # Use a short visibility extension so the message comes back later.
+        if sqs is not None and queue_url is not None:
+            try:
+                sqs.change_message_visibility(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=message["ReceiptHandle"],
+                    VisibilityTimeout=60,  # try again in 60 seconds
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("change_message_visibility_failed", job_id=job_id)
+        return False  # don't delete; let SQS redeliver
+
     # 4. Transition to PROCESSING with optimistic lock
     try:
         job = jobs_svc.update_job_status(
@@ -156,6 +175,10 @@ def handle_message(
         )
     except processor.ProcessingError as e:
         receive_count = int(message.get("Attributes", {}).get("ApproximateReceiveCount", "1"))
+
+        # Record failure in the circuit breaker so repeated failures across
+        # workers accumulate toward the OPEN threshold.
+        cb.record_failure(redis_client, job.report_type)
 
         # Always log the failure
         log.warning(
@@ -208,6 +231,7 @@ def handle_message(
         logger.warning("could not write COMPLETED for job %s (lock conflict)", job_id)
         return True
 
+    cb.record_success(redis_client, completed_job.report_type)
     _publish_event(redis_client, job=completed_job, event_status="COMPLETED")
     metrics.job_completed(
         report_type=completed_job.report_type,

@@ -58,3 +58,32 @@ services:
       - "../backend/app:/app/app"
       - "../backend/worker:/app/worker"
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  worker:
+    image: prosperas-api:dev
+    command: ["python", "-m", "worker.main"]
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DYNAMODB_USERS_TABLE: users
+      DYNAMODB_JOBS_TABLE: jobs
+      SQS_HIGH_QUEUE_URL: http://localstack:4566/000000000000/jobs-high
+      SQS_STANDARD_QUEUE_URL: http://localstack:4566/000000000000/jobs-standard
+      SQS_DLQ_URL: http://localstack:4566/000000000000/jobs-dlq
+      S3_REPORTS_BUCKET: prosperas-reports-local
+      SNS_TOPIC_ARN: arn:aws:sns:us-east-1:000000000000:job-updates
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: local-dev-secret-CHANGE-IN-PROD
+      WORKER_CONCURRENCY: 4
+      LOG_LEVEL: INFO
+      GIT_SHA: dev
+    depends_on:
+      api:
+        condition: service_started
+    volumes:
+      - "../backend/app:/app/app"
+      - "../backend/worker:/app/worker"
+    deploy:
+      replicas: 2

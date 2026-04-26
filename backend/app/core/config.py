@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiry_minutes: int = 60
 
+    # Worker
+    worker_concurrency: int = 4
+
     # Logging
     log_level: str = "INFO"
 

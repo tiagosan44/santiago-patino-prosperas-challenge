@@ -3,7 +3,7 @@ services:
     image: localstack/localstack:3.5
     ports: ["4566:4566"]
     environment:
-      SERVICES: sqs,sns,dynamodb,s3,iam
+      SERVICES: sqs,sns,dynamodb,s3,iam,sts
       DEBUG: 0
       AWS_DEFAULT_REGION: us-east-1
     volumes:

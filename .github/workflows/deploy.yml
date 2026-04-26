@@ -1,0 +1,269 @@
+name: Deploy to AWS production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # allow manual re-deploy
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false  # never cancel a deploy mid-flight
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  validate:
+    name: Validate (lint + tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install backend deps
+        working-directory: backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Backend tests
+        working-directory: backend
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+        run: pytest --cov=app --cov=worker --cov-report=term
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Frontend type check + tests
+        working-directory: frontend
+        run: |
+          npx tsc --noEmit
+          npm test
+
+  build-and-push:
+    name: Build + push images to ECR
+    needs: [validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        name: Compute image tag
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build + push api image
+        env:
+          REPO: ${{ steps.ecr.outputs.registry }}/prosperas-api
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build -t "$REPO:$TAG" -t "$REPO:latest" backend/
+          docker push "$REPO:$TAG"
+          docker push "$REPO:latest"
+
+      - name: Build + push worker image (same image, different tag intent)
+        env:
+          REPO: ${{ steps.ecr.outputs.registry }}/prosperas-worker
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build -t "$REPO:$TAG" -t "$REPO:latest" backend/
+          docker push "$REPO:$TAG"
+          docker push "$REPO:latest"
+
+      - name: Build + upload frontend
+        env:
+          ALB_HOST: prosperas-alb-placeholder.us-east-1.elb.amazonaws.com
+        run: |
+          # The real ALB host is in terraform output; CI pulls it after
+          # apply. For the build, we use a placeholder; the deploy job
+          # invalidates and rebuilds with the real host.
+          echo "Frontend build is rebuilt in the deploy job after terraform output is available"
+
+  deploy-infra:
+    name: Terraform apply
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      alb_dns_name: ${{ steps.tf_out.outputs.alb_dns_name }}
+      frontend_url: ${{ steps.tf_out.outputs.frontend_url }}
+      cloudfront_distribution_id: ${{ steps.tf_out.outputs.cloudfront_distribution_id }}
+      frontend_bucket_name: ${{ steps.tf_out.outputs.frontend_bucket_name }}
+      ecs_cluster_name: ${{ steps.tf_out.outputs.ecs_cluster_name }}
+      api_service_name: ${{ steps.tf_out.outputs.api_service_name }}
+      worker_service_name: ${{ steps.tf_out.outputs.worker_service_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.6"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: terraform init
+        working-directory: infra/terraform/environments/prod
+        run: terraform init -input=false
+
+      - name: terraform apply
+        working-directory: infra/terraform/environments/prod
+        env:
+          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
+          TF_VAR_image_tag: ${{ needs.build-and-push.outputs.image_tag }}
+        run: terraform apply -auto-approve -input=false -no-color
+
+      - name: Capture outputs
+        id: tf_out
+        working-directory: infra/terraform/environments/prod
+        run: |
+          echo "alb_dns_name=$(terraform output -raw alb_dns_name)" >> "$GITHUB_OUTPUT"
+          echo "frontend_url=$(terraform output -raw frontend_url)" >> "$GITHUB_OUTPUT"
+          echo "cloudfront_distribution_id=$(terraform output -raw cloudfront_distribution_id)" >> "$GITHUB_OUTPUT"
+          echo "frontend_bucket_name=$(terraform output -raw frontend_bucket_name)" >> "$GITHUB_OUTPUT"
+          echo "ecs_cluster_name=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "api_service_name=$(terraform output -raw api_service_name)" >> "$GITHUB_OUTPUT"
+          echo "worker_service_name=$(terraform output -raw worker_service_name)" >> "$GITHUB_OUTPUT"
+
+  deploy-frontend:
+    name: Build + upload frontend to S3 + invalidate CloudFront
+    needs: [deploy-infra]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install + build with real ALB URL
+        working-directory: frontend
+        env:
+          VITE_API_URL: http://${{ needs.deploy-infra.outputs.alb_dns_name }}
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Upload to S3
+        run: |
+          aws s3 sync frontend/dist/ s3://${{ needs.deploy-infra.outputs.frontend_bucket_name }}/ --delete
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ needs.deploy-infra.outputs.cloudfront_distribution_id }} \
+            --paths "/*"
+
+  refresh-services:
+    name: Force-new-deployment of ECS services
+    needs: [build-and-push, deploy-infra]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Force new deployment (api)
+        run: |
+          aws ecs update-service \
+            --cluster ${{ needs.deploy-infra.outputs.ecs_cluster_name }} \
+            --service ${{ needs.deploy-infra.outputs.api_service_name }} \
+            --force-new-deployment \
+            --no-cli-pager > /dev/null
+
+      - name: Force new deployment (worker)
+        run: |
+          aws ecs update-service \
+            --cluster ${{ needs.deploy-infra.outputs.ecs_cluster_name }} \
+            --service ${{ needs.deploy-infra.outputs.worker_service_name }} \
+            --force-new-deployment \
+            --no-cli-pager > /dev/null
+
+      - name: Wait for api stable
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ needs.deploy-infra.outputs.ecs_cluster_name }} \
+            --services ${{ needs.deploy-infra.outputs.api_service_name }}
+
+  smoke:
+    name: Smoke test (curl /health)
+    needs: [deploy-infra, refresh-services]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wait + probe /health
+        env:
+          ALB_HOST: ${{ needs.deploy-infra.outputs.alb_dns_name }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -sf "http://$ALB_HOST/health" -o /tmp/health.json; then
+              echo "API healthy:"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "[$i/5] not yet healthy, sleeping 20s..."
+            sleep 20
+          done
+          echo "API failed to come healthy" >&2
+          exit 1
+
+  summary:
+    name: Print deployment URLs
+    needs: [deploy-infra, deploy-frontend, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "## Deployment complete :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Frontend (CloudFront, HTTPS):** ${{ needs.deploy-infra.outputs.frontend_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **API (ALB, HTTP):** http://${{ needs.deploy-infra.outputs.alb_dns_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health check:** http://${{ needs.deploy-infra.outputs.alb_dns_name }}/health" >> $GITHUB_STEP_SUMMARY

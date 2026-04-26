@@ -8,8 +8,8 @@ which is acceptable.
 
 handle_message is the per-message workflow: read job from DynamoDB,
 transition to PROCESSING with optimistic locking, run the processor,
-transition to COMPLETED (or FAILED on ProcessingError), publish an
-SNS event for real-time updates.
+transition to COMPLETED (or FAILED on ProcessingError), publish a
+Redis event for real-time updates.
 
 Async upgrade with aioboto3 lands in Task 3.3 (4 concurrent tasks per
 container).
@@ -62,8 +62,8 @@ def poll_next_message(sqs, wait_high: int = 1, wait_standard: int = 20) -> dict 
 
 # ----- per-message handler -----
 
-def _publish_event(sns, topic_arn: str, *, job, event_status: str) -> None:
-    """Publish a job-update event for SSE fan-out."""
+def _publish_event(redis_client, *, job, event_status: str) -> None:
+    """Publish a job-update event for SSE fan-out via Redis."""
     payload = {
         "event": "job-update",
         "job_id": job.job_id,
@@ -74,11 +74,13 @@ def _publish_event(sns, topic_arn: str, *, job, event_status: str) -> None:
         "updated_at": job.updated_at,
     }
     try:
-        sns.publish(TopicArn=topic_arn, Message=json.dumps(payload))
+        from app.services import realtime
+        realtime.publish_event(redis_client, payload)
     except Exception:  # noqa: BLE001
-        # SNS is best-effort for real-time; failing it should NOT roll
-        # back the DynamoDB transition. Log and move on.
-        logger.exception("failed to publish SNS event for job %s", job.job_id)
+        # Real-time fan-out is best-effort. The frontend can recover by
+        # polling GET /jobs on its own. Don't roll back the DynamoDB
+        # transition over a Redis hiccup.
+        logger.exception("failed to publish Redis event for job %s", job.job_id)
 
 
 def handle_message(
@@ -86,9 +88,8 @@ def handle_message(
     *,
     jobs_table,
     s3,
-    sns,
+    redis_client,
     bucket: str,
-    topic_arn: str,
 ) -> bool:
     """Process one SQS message.
 
@@ -151,7 +152,7 @@ def handle_message(
         except jobs_svc.OptimisticLockError:
             logger.warning("could not write FAILED for job %s (lock conflict)", job_id)
             return True
-        _publish_event(sns, topic_arn, job=failed_job, event_status="FAILED")
+        _publish_event(redis_client, job=failed_job, event_status="FAILED")
         return True
     except Exception:  # noqa: BLE001
         logger.exception("unexpected error processing job %s, leaving for retry", job_id)
@@ -170,5 +171,5 @@ def handle_message(
         logger.warning("could not write COMPLETED for job %s (lock conflict)", job_id)
         return True
 
-    _publish_event(sns, topic_arn, job=completed_job, event_status="COMPLETED")
+    _publish_event(redis_client, job=completed_job, event_status="COMPLETED")
     return True

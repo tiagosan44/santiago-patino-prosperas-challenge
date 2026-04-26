@@ -33,10 +33,9 @@ def s3_bucket(aws):
 
 
 @pytest.fixture
-def sns_topic(aws):
-    sns = boto3.client("sns", region_name="us-east-1")
-    arn = sns.create_topic(Name="job-updates")["TopicArn"]
-    return {"client": sns, "arn": arn}
+def redis_client():
+    import fakeredis
+    return fakeredis.FakeStrictRedis(decode_responses=True)
 
 
 # ---- poll_next_message ----
@@ -100,7 +99,7 @@ def _build_message(job_id: str, user_id="u-1", report_type="sales") -> dict:
     }
 
 
-def test_handle_message_happy_path_completes_job(jobs_table, s3_bucket, sns_topic):
+def test_handle_message_happy_path_completes_job(jobs_table, s3_bucket, redis_client):
     job_id = _create_pending_job(jobs_table)
     msg = _build_message(job_id)
 
@@ -109,9 +108,8 @@ def test_handle_message_happy_path_completes_job(jobs_table, s3_bucket, sns_topi
             msg,
             jobs_table=jobs_table,
             s3=s3_bucket,
-            sns=sns_topic["client"],
+            redis_client=redis_client,
             bucket="prosperas-reports-test",
-            topic_arn=sns_topic["arn"],
         )
 
     assert ack is True
@@ -122,7 +120,7 @@ def test_handle_message_happy_path_completes_job(jobs_table, s3_bucket, sns_topi
     assert job.version == 3  # PENDING(1) -> PROCESSING(2) -> COMPLETED(3)
 
 
-def test_handle_message_processing_error_marks_failed(jobs_table, s3_bucket, sns_topic):
+def test_handle_message_processing_error_marks_failed(jobs_table, s3_bucket, redis_client):
     job_id = _create_pending_job(jobs_table, report_type="force_failure")
     msg = _build_message(job_id, report_type="force_failure")
 
@@ -131,9 +129,8 @@ def test_handle_message_processing_error_marks_failed(jobs_table, s3_bucket, sns
             msg,
             jobs_table=jobs_table,
             s3=s3_bucket,
-            sns=sns_topic["client"],
+            redis_client=redis_client,
             bucket="prosperas-reports-test",
-            topic_arn=sns_topic["arn"],
         )
 
     assert ack is True
@@ -142,7 +139,7 @@ def test_handle_message_processing_error_marks_failed(jobs_table, s3_bucket, sns
     assert "force_failure" in (job.error or "")
 
 
-def test_handle_message_duplicate_completed_job_acks(jobs_table, s3_bucket, sns_topic):
+def test_handle_message_duplicate_completed_job_acks(jobs_table, s3_bucket, redis_client):
     """If the job is already COMPLETED, the message is a duplicate; ack and skip."""
     job_id = _create_pending_job(jobs_table)
     # Mark it completed
@@ -157,9 +154,8 @@ def test_handle_message_duplicate_completed_job_acks(jobs_table, s3_bucket, sns_
             msg,
             jobs_table=jobs_table,
             s3=s3_bucket,
-            sns=sns_topic["client"],
+            redis_client=redis_client,
             bucket="prosperas-reports-test",
-            topic_arn=sns_topic["arn"],
         )
 
     assert ack is True
@@ -167,7 +163,7 @@ def test_handle_message_duplicate_completed_job_acks(jobs_table, s3_bucket, sns_
     mock_sleep.assert_not_called()
 
 
-def test_handle_message_optimistic_lock_collision_acks(jobs_table, s3_bucket, sns_topic):
+def test_handle_message_optimistic_lock_collision_acks(jobs_table, s3_bucket, redis_client):
     """If another worker won the race, our update fails; we ack the duplicate."""
     job_id = _create_pending_job(jobs_table)
     # Simulate another worker grabbing the job: bump version directly
@@ -195,63 +191,65 @@ def test_handle_message_optimistic_lock_collision_acks(jobs_table, s3_bucket, sn
             msg,
             jobs_table=jobs_table,
             s3=s3_bucket,
-            sns=sns_topic["client"],
+            redis_client=redis_client,
             bucket="prosperas-reports-test",
-            topic_arn=sns_topic["arn"],
         )
 
     assert ack is True
     mock_sleep.assert_not_called()
 
 
-def test_handle_message_publishes_sns_event_on_completion(jobs_table, s3_bucket, sns_topic):
-    """SNS publish was called once with the COMPLETED event."""
+def test_handle_message_publishes_redis_event_on_completion(jobs_table, s3_bucket, redis_client):
+    """Redis publish was called once with the COMPLETED event."""
     job_id = _create_pending_job(jobs_table)
     msg = _build_message(job_id)
 
-    sns_spy = MagicMock(wraps=sns_topic["client"])
+    pubsub = redis_client.pubsub()
+    pubsub.subscribe("job-updates")
+    pubsub.get_message(timeout=1)  # drain subscribe-confirmation
 
     with patch("worker.processor.simulate_sleep"):
         consumer.handle_message(
             msg,
             jobs_table=jobs_table,
             s3=s3_bucket,
-            sns=sns_spy,
+            redis_client=redis_client,
             bucket="prosperas-reports-test",
-            topic_arn=sns_topic["arn"],
         )
 
-    assert sns_spy.publish.called
-    call = sns_spy.publish.call_args
-    assert call.kwargs["TopicArn"] == sns_topic["arn"]
-    body = json.loads(call.kwargs["Message"])
+    msg = pubsub.get_message(timeout=2)
+    assert msg is not None
+    body = json.loads(msg["data"])
     assert body["job_id"] == job_id
     assert body["status"] == "COMPLETED"
     assert body["user_id"] == "u-1"
     assert body["result_url"] == f"reports/u-1/{job_id}/result.json"
 
 
-def test_handle_message_publishes_sns_event_on_failure(jobs_table, s3_bucket, sns_topic):
+def test_handle_message_publishes_redis_event_on_failure(jobs_table, s3_bucket, redis_client):
     job_id = _create_pending_job(jobs_table, report_type="force_failure")
     msg = _build_message(job_id, report_type="force_failure")
 
-    sns_spy = MagicMock(wraps=sns_topic["client"])
+    pubsub = redis_client.pubsub()
+    pubsub.subscribe("job-updates")
+    pubsub.get_message(timeout=1)  # drain subscribe-confirmation
 
     with patch("worker.processor.simulate_sleep"):
         consumer.handle_message(
             msg,
             jobs_table=jobs_table,
             s3=s3_bucket,
-            sns=sns_spy,
+            redis_client=redis_client,
             bucket="prosperas-reports-test",
-            topic_arn=sns_topic["arn"],
         )
 
-    body = json.loads(sns_spy.publish.call_args.kwargs["Message"])
+    msg = pubsub.get_message(timeout=2)
+    assert msg is not None
+    body = json.loads(msg["data"])
     assert body["status"] == "FAILED"
 
 
-def test_handle_message_returns_false_on_unparseable_body(jobs_table, s3_bucket, sns_topic):
+def test_handle_message_returns_false_on_unparseable_body(jobs_table, s3_bucket, redis_client):
     """Corrupt body -> let SQS retry (which will eventually DLQ)."""
     msg = {
         "MessageId": "m-1",
@@ -261,21 +259,19 @@ def test_handle_message_returns_false_on_unparseable_body(jobs_table, s3_bucket,
     }
     ack = consumer.handle_message(
         msg, jobs_table=jobs_table, s3=s3_bucket,
-        sns=sns_topic["client"], bucket="prosperas-reports-test",
-        topic_arn=sns_topic["arn"],
+        redis_client=redis_client, bucket="prosperas-reports-test",
     )
     assert ack is False
 
 
-def test_handle_message_missing_job_acks(jobs_table, s3_bucket, sns_topic):
+def test_handle_message_missing_job_acks(jobs_table, s3_bucket, redis_client):
     """If the message references a non-existent job, ack and move on (poison)."""
     msg = _build_message("non-existent-job-id")
 
     with patch("worker.processor.simulate_sleep") as mock_sleep:
         ack = consumer.handle_message(
             msg, jobs_table=jobs_table, s3=s3_bucket,
-            sns=sns_topic["client"], bucket="prosperas-reports-test",
-            topic_arn=sns_topic["arn"],
+            redis_client=redis_client, bucket="prosperas-reports-test",
         )
     assert ack is True
     mock_sleep.assert_not_called()

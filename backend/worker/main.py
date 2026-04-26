@@ -48,9 +48,8 @@ async def run_one_worker(
     sqs,
     jobs_table,
     s3,
-    sns,
+    redis_client,
     bucket: str,
-    topic_arn: str,
     stop_event: asyncio.Event,
     idle_sleep: float = 0.5,
 ) -> None:
@@ -76,9 +75,8 @@ async def run_one_worker(
                 message,
                 jobs_table=jobs_table,
                 s3=s3,
-                sns=sns,
+                redis_client=redis_client,
                 bucket=bucket,
-                topic_arn=topic_arn,
             )
         except Exception:  # noqa: BLE001
             logger.exception("worker %d handle_message crashed", worker_id)
@@ -128,9 +126,8 @@ async def run_workers(
     sqs,
     jobs_table,
     s3,
-    sns,
+    redis_client,
     bucket: str,
-    topic_arn: str,
     stop_event: asyncio.Event,
 ) -> None:
     """Spawn `concurrency` workers and wait until all complete."""
@@ -141,9 +138,8 @@ async def run_workers(
                 sqs=sqs,
                 jobs_table=jobs_table,
                 s3=s3,
-                sns=sns,
+                redis_client=redis_client,
                 bucket=bucket,
-                topic_arn=topic_arn,
                 stop_event=stop_event,
             )
         )
@@ -177,6 +173,9 @@ async def main() -> None:
         settings.aws_endpoint_url,
     )
 
+    from app.services import realtime
+    redis_client = realtime.get_redis_client()
+
     stop_event = asyncio.Event()
     _install_signal_handlers(stop_event)
 
@@ -185,9 +184,8 @@ async def main() -> None:
         sqs=aws_factories.sqs_client(),
         jobs_table=aws_factories.jobs_table(),
         s3=aws_factories.s3_client(),
-        sns=aws_factories.sns_client(),
+        redis_client=redis_client,
         bucket=settings.s3_reports_bucket,
-        topic_arn=settings.sns_topic_arn,
         stop_event=stop_event,
     )
 

@@ -1,7 +1,7 @@
 """FastAPI application entrypoint."""
 from fastapi import FastAPI
 
-from .api import auth
+from .api import auth, jobs
 
 app = FastAPI(
     title="Prosperas Reports API",
@@ -10,6 +10,7 @@ app = FastAPI(
 )
 
 app.include_router(auth.router)
+app.include_router(jobs.router)
 
 
 @app.get("/health")

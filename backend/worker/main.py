@@ -28,8 +28,10 @@ import sys
 
 from app.core import aws as aws_factories
 from app.core.config import get_settings
+from app.core.logging_config import configure_logging, get_logger
 from . import consumer
 
+log = get_logger(__name__)
 logger = logging.getLogger(__name__)
 
 
@@ -54,12 +56,12 @@ async def run_one_worker(
     idle_sleep: float = 0.5,
 ) -> None:
     """One concurrent worker task. Polls and processes until stop_event is set."""
-    logger.info("worker %d starting", worker_id)
+    log.info("worker_started", worker_id=worker_id)
     while not stop_event.is_set():
         try:
             message = await asyncio.to_thread(consumer.poll_next_message, sqs)
         except Exception:  # noqa: BLE001
-            logger.exception("worker %d poll error, backing off", worker_id)
+            log.exception("worker_poll_error", worker_id=worker_id)
             await asyncio.sleep(idle_sleep)
             continue
 
@@ -79,7 +81,7 @@ async def run_one_worker(
                 bucket=bucket,
             )
         except Exception:  # noqa: BLE001
-            logger.exception("worker %d handle_message crashed", worker_id)
+            log.exception("worker_handle_crashed", worker_id=worker_id)
             should_ack = False
 
         if should_ack:
@@ -101,8 +103,8 @@ async def run_one_worker(
                     ReceiptHandle=message["ReceiptHandle"],
                 )
             except Exception:  # noqa: BLE001
-                logger.exception("worker %d delete_message failed", worker_id)
-    logger.info("worker %d stopped", worker_id)
+                log.exception("worker_delete_failed", worker_id=worker_id)
+    log.info("worker_stopped", worker_id=worker_id)
 
 
 def _is_high_priority(message: dict) -> bool:
@@ -165,12 +167,12 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> None:
 
 async def main() -> None:
     settings = get_settings()
-    logging.basicConfig(level=settings.log_level)
-    logger.info(
-        "worker booting (concurrency=%d, region=%s, endpoint=%s)",
-        settings.worker_concurrency,
-        settings.aws_region,
-        settings.aws_endpoint_url,
+    configure_logging(service="worker")
+    log.info(
+        "worker_booting",
+        concurrency=settings.worker_concurrency,
+        region=settings.aws_region,
+        endpoint=settings.aws_endpoint_url,
     )
 
     from app.services import realtime

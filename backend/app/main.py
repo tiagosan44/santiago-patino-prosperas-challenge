@@ -9,9 +9,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .api import auth, events, jobs
 from .core import errors
 from .core.config import get_settings
+from .core.logging_config import configure_logging, get_logger
 from .core.middleware import RequestIDMiddleware
 from .services import realtime
 
+configure_logging(service="api")
+log = get_logger(__name__)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -54,7 +57,7 @@ async def _redis_to_bus_relay():
             raise
         except Exception:  # noqa: BLE001
             # Reconnect on any other error after a short delay
-            logger.exception("redis subscriber crashed; reconnecting in 2s")
+            log.exception("redis_subscriber_crashed_reconnecting", retry_in_seconds=2)
             await asyncio.sleep(2)
 
 

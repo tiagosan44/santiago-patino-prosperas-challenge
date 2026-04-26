@@ -19,10 +19,12 @@ import logging
 from typing import Any
 
 from app.core.config import get_settings
+from app.core.logging_config import get_logger
 from app.models.job import JobStatus
 from app.services import jobs as jobs_svc
 from . import processor
 
+log = get_logger(__name__)
 logger = logging.getLogger(__name__)
 
 
@@ -101,18 +103,18 @@ def handle_message(
         body = json.loads(message["Body"])
         job_id = body["job_id"]
     except (json.JSONDecodeError, KeyError):
-        logger.exception("unparseable SQS body, leaving for retry/DLQ")
+        log.exception("unparseable_sqs_body", message_id=message.get("MessageId"))
         return False
 
     # 2. Lookup job
     job = jobs_svc.get_job(jobs_table, job_id)
     if job is None:
-        logger.warning("job %s not found, ack message (poison)", job_id)
+        log.warning("job_not_found_acking_poison", job_id=job_id)
         return True
 
     # 3. Skip if already terminal
     if job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
-        logger.info("job %s already %s, ack duplicate", job_id, job.status)
+        log.info("job_already_terminal_acking_duplicate", job_id=job_id, status=job.status)
         return True
 
     # 4. Transition to PROCESSING with optimistic lock
@@ -125,7 +127,7 @@ def handle_message(
             increment_attempts=True,
         )
     except jobs_svc.OptimisticLockError:
-        logger.info("job %s optimistic lock conflict, ack duplicate", job_id)
+        log.info("optimistic_lock_conflict_acking_duplicate", job_id=job_id)
         return True
 
     # 5. Process (S3 upload, possibly raises ProcessingError)
@@ -139,7 +141,7 @@ def handle_message(
             params=job.params,
         )
     except processor.ProcessingError as e:
-        logger.warning("job %s processing failed: %s", job_id, e)
+        log.warning("processing_failed", job_id=job_id, error=str(e))
         error_msg = f"[{job.report_type}] {e}"
         try:
             failed_job = jobs_svc.update_job_status(
@@ -155,7 +157,7 @@ def handle_message(
         _publish_event(redis_client, job=failed_job, event_status="FAILED")
         return True
     except Exception:  # noqa: BLE001
-        logger.exception("unexpected error processing job %s, leaving for retry", job_id)
+        log.exception("unexpected_processing_error", job_id=job_id)
         return False
 
     # 6. Transition to COMPLETED
@@ -172,4 +174,5 @@ def handle_message(
         return True
 
     _publish_event(redis_client, job=completed_job, event_status="COMPLETED")
+    log.info("job_completed", job_id=job_id, attempts=completed_job.attempts)
     return True

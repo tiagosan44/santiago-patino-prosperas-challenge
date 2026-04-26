@@ -55,7 +55,7 @@ playwright/.cache/
 
 # ===== Terraform =====
 .terraform/
-.terraform.lock.hcl
+# .terraform.lock.hcl is intentionally tracked (pin provider versions)
 *.tfstate
 *.tfstate.*
 *.tfvars

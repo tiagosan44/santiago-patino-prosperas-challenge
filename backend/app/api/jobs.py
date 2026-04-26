@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from ..core import aws as aws_factories
+from ..core import metrics
 from ..core.config import get_settings
 from ..models.job import (
     Job, JobCreateRequest, JobPage, JobStatus,
@@ -77,6 +78,7 @@ def create_job(
         priority=priority,
         params=job.params,
     )
+    metrics.job_created(report_type=job.report_type, priority=priority.value)
     return JobResponse.from_job(job)
 
 

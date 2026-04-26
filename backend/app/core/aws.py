@@ -54,10 +54,16 @@ def sns_client():
     return boto3.client("sns", **_client_kwargs())
 
 
+@lru_cache(maxsize=1)
+def cloudwatch_client():
+    return boto3.client("cloudwatch", **_client_kwargs())
+
+
 def reset_clients() -> None:
     """For tests: clears all cached clients so the next call rebuilds them."""
     dynamo_resource.cache_clear()
     sqs_client.cache_clear()
     s3_client.cache_clear()
     sns_client.cache_clear()
+    cloudwatch_client.cache_clear()
     get_settings.cache_clear()

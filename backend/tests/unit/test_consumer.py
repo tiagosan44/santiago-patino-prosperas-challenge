@@ -14,6 +14,14 @@ from app.services import jobs as jobs_svc
 from worker import consumer, processor
 
 
+@pytest.fixture
+def cw_client(aws):
+    """Activates moto's cloudwatch mock and resets the cached client."""
+    from app.core import aws as aws_factories
+    aws_factories.reset_clients()
+    return boto3.client("cloudwatch", region_name="us-east-1")
+
+
 # ---- Fixtures ----
 
 @pytest.fixture
@@ -275,3 +283,37 @@ def test_handle_message_missing_job_acks(jobs_table, s3_bucket, redis_client):
         )
     assert ack is True
     mock_sleep.assert_not_called()
+
+
+def test_handle_message_emits_completed_metric(jobs_table, s3_bucket, redis_client, cw_client):
+    job_id = _create_pending_job(jobs_table)
+    msg = _build_message(job_id)
+
+    with patch("worker.processor.simulate_sleep"):
+        consumer.handle_message(
+            msg,
+            jobs_table=jobs_table,
+            s3=s3_bucket,
+            redis_client=redis_client,
+            bucket="prosperas-reports-test",
+        )
+
+    res = cw_client.list_metrics(Namespace="Prosperas", MetricName="jobs.completed")
+    assert len(res["Metrics"]) >= 1
+
+
+def test_handle_message_emits_failed_metric(jobs_table, s3_bucket, redis_client, cw_client):
+    job_id = _create_pending_job(jobs_table, report_type="force_failure")
+    msg = _build_message(job_id, report_type="force_failure")
+
+    with patch("worker.processor.simulate_sleep"):
+        consumer.handle_message(
+            msg,
+            jobs_table=jobs_table,
+            s3=s3_bucket,
+            redis_client=redis_client,
+            bucket="prosperas-reports-test",
+        )
+
+    res = cw_client.list_metrics(Namespace="Prosperas", MetricName="jobs.failed")
+    assert len(res["Metrics"]) >= 1

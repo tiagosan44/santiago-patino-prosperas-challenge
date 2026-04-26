@@ -16,8 +16,10 @@ container).
 """
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.logging_config import get_logger
 from app.models.job import JobStatus
@@ -155,6 +157,7 @@ def handle_message(
             logger.warning("could not write FAILED for job %s (lock conflict)", job_id)
             return True
         _publish_event(redis_client, job=failed_job, event_status="FAILED")
+        metrics.job_failed(report_type=failed_job.report_type, error_type=type(e).__name__)
         return True
     except Exception:  # noqa: BLE001
         log.exception("unexpected_processing_error", job_id=job_id)
@@ -174,5 +177,18 @@ def handle_message(
         return True
 
     _publish_event(redis_client, job=completed_job, event_status="COMPLETED")
+    metrics.job_completed(
+        report_type=completed_job.report_type,
+        priority=completed_job.priority.value,
+    )
+    enq = body.get("enqueued_at")
+    if enq:
+        try:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(enq)).total_seconds()
+            metrics.job_processing_duration_seconds(
+                report_type=completed_job.report_type, seconds=elapsed,
+            )
+        except (ValueError, TypeError):
+            log.warning("processing_duration_metric_failed", job_id=completed_job.job_id)
     log.info("job_completed", job_id=job_id, attempts=completed_job.attempts)
     return True

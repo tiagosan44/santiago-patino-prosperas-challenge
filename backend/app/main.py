@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api import auth, jobs
+from .api import auth, jobs, events
 from .core import errors
 from .core.middleware import RequestIDMiddleware
 
@@ -23,6 +23,7 @@ app.add_exception_handler(Exception, errors.unhandled_exception_handler)
 
 app.include_router(auth.router)
 app.include_router(jobs.router)
+app.include_router(events.router)
 
 
 @app.get("/health")

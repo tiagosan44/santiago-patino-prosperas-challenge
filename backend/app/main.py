@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api import auth, events, jobs
+from .api import auth, events, health as health_api, jobs
 from .core import errors
 from .core.config import get_settings
 from .core.logging_config import configure_logging, get_logger
@@ -34,11 +34,7 @@ app.add_exception_handler(Exception, errors.unhandled_exception_handler)
 app.include_router(auth.router)
 app.include_router(jobs.router)
 app.include_router(events.router)
-
-
-@app.get("/health")
-async def health() -> dict:
-    return {"status": "healthy"}
+app.include_router(health_api.router)
 
 
 # ----- Redis -> SSE bus relay -----

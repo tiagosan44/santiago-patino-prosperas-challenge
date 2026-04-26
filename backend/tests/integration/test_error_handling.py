@@ -1,4 +1,5 @@
 """Tests for global error format and request_id middleware."""
+import boto3
 import pytest
 from fastapi.testclient import TestClient
 
@@ -10,13 +11,26 @@ from app.main import app
 def client(users_table, jobs_table):
     """Minimal client; we don't need SQS/S3 for error tests."""
     from app.api import auth as auth_api
+    from app.api import health as health_api
     from app.api import jobs as jobs_api
+
+    # Create SQS queues and S3 bucket so /health returns 200 (used by request_id tests)
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    sqs.create_queue(QueueName="jobs-high")
+    sqs.create_queue(QueueName="jobs-standard")
+    sqs.create_queue(QueueName="jobs-dlq")
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="prosperas-reports-test")
+    # Redis is not available in the moto test environment; stub it out.
+    _orig_check_redis = health_api._check_redis
+    health_api._check_redis = lambda: None
 
     reset_clients()
     app.dependency_overrides[auth_api.get_users_table] = lambda: users_table
     app.dependency_overrides[jobs_api.get_jobs_table] = lambda: jobs_table
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
+    health_api._check_redis = _orig_check_redis
 
 
 # ---- request_id ----

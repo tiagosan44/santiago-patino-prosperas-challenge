@@ -6,9 +6,10 @@
 
 ## Production URLs
 
-- **Frontend:** _to be set after first `terraform apply`_ (CloudFront `*.cloudfront.net` URL — HTTPS by default)
-- **API:** _to be set after first `terraform apply`_ (ALB `*.elb.amazonaws.com` — HTTP for the demo; HTTPS would require a domain + ACM cert)
-- **API health:** `<API_URL>/health`
+- **Frontend:** https://dk6ofz2gm79zv.cloudfront.net (HTTPS via CloudFront default cert)
+- **API:** http://prosperas-alb-1832030870.us-east-1.elb.amazonaws.com (HTTP — see "Decisions" below)
+- **API health:** http://prosperas-alb-1832030870.us-east-1.elb.amazonaws.com/health
+- **Demo login:** `alice` / `secret123`
 
 The deploy workflow prints both URLs in the GitHub Actions run summary on every push to `main`.
 

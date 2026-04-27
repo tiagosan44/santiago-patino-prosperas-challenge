@@ -237,22 +237,28 @@ jobs:
     name: Smoke test (curl /health)
     needs: [deploy-infra, refresh-services]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Wait + probe /health
         env:
           ALB_HOST: ${{ needs.deploy-infra.outputs.alb_dns_name }}
         run: |
-          for i in 1 2 3 4 5; do
-            if curl -sf "http://$ALB_HOST/health" -o /tmp/health.json; then
+          # Initial buffer so ALB drains old tasks. ECS rolling deploy
+          # (min_healthy=50) can briefly serve mixed versions; 30s lets
+          # the new tasks pass their target-group health check.
+          echo "Initial wait 30s for rolling deploy to settle..."
+          sleep 30
+          # 12 x 20s = 4 minutes total; covers slow ECS rolls.
+          for i in $(seq 1 12); do
+            if curl -sf -m 10 "http://$ALB_HOST/health" -o /tmp/health.json; then
               echo "API healthy:"
               cat /tmp/health.json
               exit 0
             fi
-            echo "[$i/5] not yet healthy, sleeping 20s..."
+            echo "[$i/12] not yet healthy, sleeping 20s..."
             sleep 20
           done
-          echo "API failed to come healthy" >&2
+          echo "API failed to come healthy after 4 minutes" >&2
           exit 1
 
   summary:

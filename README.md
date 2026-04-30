@@ -1,8 +1,11 @@
+[![Deploy to AWS production](https://github.com/tiagosan44/santiago-patino-prosperas-challenge/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/tiagosan44/santiago-patino-prosperas-challenge/actions/workflows/deploy.yml)
+
 # Prosperas Full-Stack Challenge
 
 > Async report processing system — FastAPI workers behind an SQS queue, React frontend with real-time updates over SSE, deployed to AWS via Terraform with full CI/CD.
 
 **Author:** Santiago Patiño · 2026-04-26
+**AI workflow:** see [`AI_WORKFLOW.md`](./AI_WORKFLOW.md)
 
 ## Production URLs
 

@@ -89,8 +89,12 @@ resource "aws_ecs_task_definition" "api" {
           awslogs-stream-prefix = "ecs"
         }
       }
+      # Use Python (already present in the image) instead of curl
+      # (which is not in python:3.12-slim) — every check on the previous
+      # config exited "curl: not found", so ECS killed each container
+      # 90s after start and the rolling deploy never converged.
       healthCheck = {
-        command     = ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+        command     = ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
         interval    = 30
         timeout     = 5
         retries     = 3

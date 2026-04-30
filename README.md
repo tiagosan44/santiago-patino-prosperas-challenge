@@ -9,12 +9,13 @@
 
 ## Production URLs
 
-- **Frontend:** https://dk6ofz2gm79zv.cloudfront.net (HTTPS via CloudFront default cert)
-- **API:** http://prosperas-alb-1832030870.us-east-1.elb.amazonaws.com (HTTP — see "Decisions" below)
-- **API health:** http://prosperas-alb-1832030870.us-east-1.elb.amazonaws.com/health
+- **Frontend:** https://dk6ofz2gm79zv.cloudfront.net
+- **API:** https://dk6ofz2gm79zv.cloudfront.net (same CloudFront, second origin)
+- **API health:** https://dk6ofz2gm79zv.cloudfront.net/health
+- **API docs:** https://dk6ofz2gm79zv.cloudfront.net/docs
 - **Demo login:** `alice` / `secret123`
 
-The deploy workflow prints both URLs in the GitHub Actions run summary on every push to `main`.
+The frontend and API are both served from the same CloudFront distribution so the browser stays on a single HTTPS origin (no Mixed Content). CloudFront terminates TLS with its default certificate; the CloudFront → ALB hop is HTTP inside AWS. The deploy workflow prints the URLs in the GitHub Actions run summary on every push to `main`.
 
 ## Tech stack
 
@@ -126,7 +127,7 @@ A short overview is below; the full reasoning lives in [`TECHNICAL_DOCS.md`](./T
 - **SSE + Redis pub/sub** instead of WebSockets API Gateway — server-to-client only, HTTP/1.1 friendly, automatic reconnect via `EventSource`. Redis handles fan-out across multiple API replicas.
 - **Custom exponential back-off** (B4) and **shared circuit breaker in Redis** (B2) — SQS only does linear redelivery natively; the worker calls `change_message_visibility` with growing timeouts, and the breaker uses Redis transactions for atomic state across replicas.
 - **Single NAT gateway** in one AZ — accepted single-AZ failure risk for the ~$30/mo savings; documented as a production upgrade.
-- **HTTP-only ALB** — the demo doesn't have a domain for ACM. The frontend on CloudFront serves HTTPS via the default certificate.
+- **CloudFront in front of both frontend and API** — the demo doesn't have a domain for ACM, so the ALB is HTTP-only inside the VPC. CloudFront terminates HTTPS at the edge with its default certificate and proxies API paths (`/auth/*`, `/jobs`, `/jobs/*`, `/events/*`, `/health`, `/openapi.json`, `/docs`, `/docs/*`) to the ALB as a second origin. SSE paths use `compress=false` so CloudFront doesn't buffer event streams.
 
 ## Repository layout
 

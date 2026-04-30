@@ -112,4 +112,5 @@ module "cloudfront" {
   frontend_bucket_id                   = module.s3.frontend_bucket_name
   frontend_bucket_arn                  = module.s3.frontend_bucket_arn
   frontend_bucket_regional_domain_name = module.s3.frontend_bucket_regional_domain_name
+  alb_dns_name                         = module.alb.alb_dns_name
 }

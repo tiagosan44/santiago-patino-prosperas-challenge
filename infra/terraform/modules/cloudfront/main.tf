@@ -22,6 +22,24 @@ resource "aws_cloudfront_distribution" "frontend" {
     origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
   }
 
+  # API ALB as second origin (HTTP backend; CloudFront terminates TLS).
+  # Lets the browser hit https://<cloudfront>/auth/... instead of plain
+  # http://<alb>/auth/... — fixes Mixed Content because everything is
+  # same-origin HTTPS from the browser's perspective.
+  origin {
+    origin_id   = "api-alb"
+    domain_name = var.alb_dns_name
+
+    custom_origin_config {
+      http_port                = 80
+      https_port               = 443
+      origin_protocol_policy   = "http-only" # backend is HTTP; only CloudFront <-> ALB hop is HTTP
+      origin_ssl_protocols     = ["TLSv1.2"]
+      origin_read_timeout      = 60 # SSE keepalives every 15s; need > that
+      origin_keepalive_timeout = 60
+    }
+  }
+
   default_cache_behavior {
     target_origin_id       = "frontend-s3"
     viewer_protocol_policy = "redirect-to-https"
@@ -39,6 +57,32 @@ resource "aws_cloudfront_distribution" "frontend" {
     min_ttl     = 0
     default_ttl = 300
     max_ttl     = 86400
+  }
+
+  # API behaviors — pass everything through, no caching.
+  # Order matters: more specific paths first; CloudFront uses first-match.
+  dynamic "ordered_cache_behavior" {
+    for_each = ["/auth/*", "/jobs", "/jobs/*", "/events/*", "/health", "/openapi.json", "/docs", "/docs/*"]
+    content {
+      path_pattern           = ordered_cache_behavior.value
+      target_origin_id       = "api-alb"
+      viewer_protocol_policy = "redirect-to-https"
+      allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+      cached_methods         = ["GET", "HEAD"]
+      compress               = false # SSE must NOT be buffered/gzipped at CloudFront
+
+      forwarded_values {
+        query_string = true
+        headers      = ["Authorization", "Accept", "Content-Type", "Origin", "Host"]
+        cookies {
+          forward = "all"
+        }
+      }
+
+      min_ttl     = 0
+      default_ttl = 0
+      max_ttl     = 0
+    }
   }
 
   # SPA routing: 403/404 from S3 -> serve index.html with 200
